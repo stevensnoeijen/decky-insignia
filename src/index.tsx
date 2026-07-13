@@ -1,115 +1,121 @@
 import {
-  ButtonItem,
   PanelSection,
   PanelSectionRow,
-  Navigation,
+  Focusable,
   staticClasses
 } from "@decky/ui";
 import {
-  addEventListener,
-  removeEventListener,
   callable,
   definePlugin,
-  toaster,
-  // routerHook
 } from "@decky/api"
-import { useState } from "react";
-import { FaShip } from "react-icons/fa";
+import { useEffect, useState } from "react";
+import { FaSatelliteDish } from "react-icons/fa";
 
-// import logo from "../assets/logo.png";
+type ActiveGame = {
+  name: string;
+  players: number;
+};
 
-// This function calls the python function "add", which takes in two numbers and returns their sum (as a number)
-// Note the type annotations:
-//  the first one: [first: number, second: number] is for the arguments
-//  the second one: number is for the return value
-const add = callable<[first: number, second: number], number>("add");
+type ActiveGamesResponse = {
+  error: boolean;
+  message?: string;
+  games?: ActiveGame[];
+  total?: number;
+};
 
-// This function calls the python function "start_timer", which takes in no arguments and returns nothing.
-// It starts a (python) timer which eventually emits the event 'timer_event'
-const startTimer = callable<[], void>("start_timer");
+// Calls the python function "get_active_games", which fetches (and caches) the
+// current Insignia network stats and returns them in a normalized shape.
+const getActiveGames = callable<[], ActiveGamesResponse>("get_active_games");
+
+function StatRow({ label, value }: { label: string; value: number | string }) {
+  return (
+    <PanelSectionRow>
+      <Focusable style={{ display: "flex", justifyContent: "space-between", width: "100%" }}>
+        <span>{label}</span>
+        <span style={{ fontWeight: "bold" }}>{value}</span>
+      </Focusable>
+    </PanelSectionRow>
+  );
+}
 
 function Content() {
-  const [result, setResult] = useState<number | undefined>();
+  const [loading, setLoading] = useState(true);
+  const [stats, setStats] = useState<ActiveGamesResponse | null>(null);
 
-  const onClick = async () => {
-    const result = await add(Math.random(), Math.random());
-    setResult(result);
-  };
+  useEffect(() => {
+    let cancelled = false;
+
+    setLoading(true);
+    getActiveGames().then((result) => {
+      if (cancelled) return;
+      setStats(result);
+      setLoading(false);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (loading) {
+    return (
+      <PanelSection title="Insignia">
+        <PanelSectionRow>
+          <div>Scanning active lobbies...</div>
+        </PanelSectionRow>
+      </PanelSection>
+    );
+  }
+
+  if (!stats || stats.error) {
+    return (
+      <PanelSection title="Insignia">
+        <PanelSectionRow>
+          <div>Could not load stats. Check connection.</div>
+        </PanelSectionRow>
+      </PanelSection>
+    );
+  }
+
+  const games = stats.games ?? [];
+  const total = stats.total ?? 0;
+
+  if (games.length === 0 && total === 0) {
+    return (
+      <PanelSection title="Insignia">
+        <PanelSectionRow>
+          <div>No active lobbies right now.</div>
+        </PanelSectionRow>
+      </PanelSection>
+    );
+  }
 
   return (
-    <PanelSection title="Panel Section">
-      <PanelSectionRow>
-        <ButtonItem
-          layout="below"
-          onClick={onClick}
-        >
-          {result ?? "Add two numbers via Python"}
-        </ButtonItem>
-      </PanelSectionRow>
-      <PanelSectionRow>
-        <ButtonItem
-          layout="below"
-          onClick={() => startTimer()}
-        >
-          {"Start Python timer"}
-        </ButtonItem>
-      </PanelSectionRow>
-
-      {/* <PanelSectionRow>
-        <div style={{ display: "flex", justifyContent: "center" }}>
-          <img src={logo} />
-        </div>
-      </PanelSectionRow> */}
-
-      {/*<PanelSectionRow>
-        <ButtonItem
-          layout="below"
-          onClick={() => {
-            Navigation.Navigate("/decky-plugin-test");
-            Navigation.CloseSideMenus();
-          }}
-        >
-          Router
-        </ButtonItem>
-      </PanelSectionRow>*/}
+    <PanelSection title="Insignia">
+      {games.length > 0 ? (
+        games.map((game) => (
+          <StatRow key={game.name} label={game.name} value={game.players} />
+        ))
+      ) : (
+        <StatRow label="Total Active Players" value={total} />
+      )}
     </PanelSection>
   );
 };
 
 export default definePlugin(() => {
-  console.log("Template plugin initializing, this is called once on frontend startup")
-
-  // serverApi.routerHook.addRoute("/decky-plugin-test", DeckyPluginRouterTest, {
-  //   exact: true,
-  // });
-
-  // Add an event listener to the "timer_event" event from the backend
-  const listener = addEventListener<[
-    test1: string,
-    test2: boolean,
-    test3: number
-  ]>("timer_event", (test1, test2, test3) => {
-    console.log("Template got timer_event with:", test1, test2, test3)
-    toaster.toast({
-      title: "template got timer_event",
-      body: `${test1}, ${test2}, ${test3}`
-    });
-  });
-
   return {
     // The name shown in various decky menus
-    name: "Test Plugin",
+    name: "Insignia",
     // The element displayed at the top of your plugin's menu
-    titleView: <div className={staticClasses.Title}>Decky Example Plugin</div>,
+    titleView: <div className={staticClasses.Title}>Insignia</div>,
     // The content of your plugin's menu
     content: <Content />,
     // The icon displayed in the plugin list
-    icon: <FaShip />,
+    icon: <FaSatelliteDish />,
     // The function triggered when your plugin unloads
     onDismount() {
-      console.log("Unloading")
-      removeEventListener("timer_event", listener);
-      // serverApi.routerHook.removeRoute("/decky-plugin-test");
+      console.log("Unloading Insignia")
     },
   };
 });

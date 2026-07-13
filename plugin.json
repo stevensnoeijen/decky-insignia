@@ -1,11 +1,11 @@
 {
-  "name": "Example Plugin",
-  "author": "John Doe",
+  "name": "Insignia",
+  "author": "Steven Snoeijen",
   "flags": ["debug", "_root"],
   "api_version": 1,
   "publish": {
-    "tags": ["template", "root"],
-    "description": "Decky example plugin.",
+    "tags": ["insignia", "stats", "network"],
+    "description": "Shows currently active games and player counts on the Insignia network in the Quick Access Menu.",
     "image": "https://opengraph.githubassets.com/1/SteamDeckHomebrew/PluginLoader"
   }
 }

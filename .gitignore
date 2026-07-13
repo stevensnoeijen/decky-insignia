@@ -24,6 +24,9 @@ node_modules
 bower_components
 .pnpm-store
 
+# This project uses pnpm (pnpm-lock.yaml) — ignore accidental npm lockfiles
+package-lock.json
+
 # Editors
 .idea
 *.iml
@@ -55,3 +58,6 @@ out/*
 cli/
 cli/*
 cli/decky
+
+# Vendored Python deps (reinstall via `pip install --target=py_modules -r requirements.txt`)
+py_modules/*
