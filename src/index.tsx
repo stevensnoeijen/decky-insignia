@@ -50,6 +50,18 @@ type ActiveGamesResponse = {
   total?: number;
 };
 
+// Mirrors @decky/ui's EConnectivityTestResult, which isn't exported from the
+// package root (only reachable via SteamClient's internal type tree).
+enum EConnectivityTestResult {
+  Unknown,
+  Connected,
+  CaptivePortal,
+  TimedOut,
+  Failed,
+  WifiDisabled,
+  NoLAN,
+}
+
 // Calls the python function "get_active_games", which fetches (and caches) the
 // current Insignia network stats and returns them in a normalized shape.
 const getActiveGames = callable<[], ActiveGamesResponse>("get_active_games");
@@ -109,6 +121,15 @@ function Content() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [stats, setStats] = useState<ActiveGamesResponse | null>(null);
+  const [connectivity, setConnectivity] = useState(EConnectivityTestResult.Unknown);
+
+  useEffect(() => {
+    const registration = SteamClient.System.Network.RegisterForConnectivityTestChanges(
+      (test) => setConnectivity(test.eConnectivityTestResult)
+    );
+    SteamClient.System.Network.ForceTestConnectivity();
+    return () => registration.unregister();
+  }, []);
 
   const fetchStats = useCallback((isRefresh: boolean) => {
     if (isRefresh) {
@@ -146,11 +167,18 @@ function Content() {
   }
 
   if (!stats || stats.error) {
+    const offline =
+      connectivity !== EConnectivityTestResult.Unknown &&
+      connectivity !== EConnectivityTestResult.Connected;
+    const message = offline
+      ? "No internet connection. Check your wifi."
+      : "Could not load stats. Insignia service may be unreachable.";
+
     return (
       <PanelSection>
         <Header refreshing={refreshing} onRefresh={handleRefresh} />
         <PanelSectionRow>
-          <div>Could not load stats. Check connection.</div>
+          <div>{message}</div>
         </PanelSectionRow>
       </PanelSection>
     );
