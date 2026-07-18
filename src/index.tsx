@@ -160,7 +160,7 @@ function Content() {
       <PanelSection>
         <Header refreshing={refreshing} onRefresh={handleRefresh} />
         <PanelSectionRow>
-          <div>Scanning active lobbies...</div>
+          <div>Loading Insignia stats...</div>
         </PanelSectionRow>
       </PanelSection>
     );
