@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import time
 
 # The decky plugin module is located at decky-loader/plugin
 # For easy intellisense checkout the decky-loader code repo
@@ -11,7 +10,6 @@ import asyncio
 import requests
 
 INSIGNIA_STATS_URL = "https://insigniastats.live/api/online-users"
-CACHE_TTL_SECONDS = 60
 
 
 def _normalize_games(entries: list) -> list[dict]:
@@ -65,14 +63,7 @@ def _parse_stats_response(raw) -> dict:
 
 
 class Plugin:
-    _cache = {"timestamp": 0.0, "data": None}
-
     async def get_active_games(self) -> dict:
-        now = time.time()
-        cached = self._cache["data"]
-        if cached is not None and (now - self._cache["timestamp"]) < CACHE_TTL_SECONDS:
-            return cached
-
         try:
             response = requests.get(INSIGNIA_STATS_URL, timeout=10)
             response.raise_for_status()
@@ -84,11 +75,7 @@ class Plugin:
             decky.logger.error(f"Insignia: could not parse JSON response: {e}")
             return {"error": True, "message": "Received an invalid response from the stats service."}
 
-        result = _parse_stats_response(raw)
-        if not result["error"]:
-            self._cache["data"] = result
-            self._cache["timestamp"] = now
-        return result
+        return _parse_stats_response(raw)
 
     # Asyncio-compatible long-running code, executed in a task when the plugin is loaded
     async def _main(self):
