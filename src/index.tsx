@@ -2,13 +2,15 @@ import {
   PanelSection,
   PanelSectionRow,
   Focusable,
+  DialogButton,
   staticClasses
 } from "@decky/ui";
 import {
   callable,
   definePlugin,
 } from "@decky/api"
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
+import { FaSyncAlt } from "react-icons/fa";
 
 function InsigniaIcon() {
   return (
@@ -77,28 +79,65 @@ function StatRow({ label, value }: { label: string; value: number | string }) {
   );
 }
 
+function Header({ refreshing, onRefresh }: { refreshing: boolean; onRefresh: () => void }) {
+  return (
+    <PanelSectionRow>
+      <style>{"@keyframes insignia-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }"}</style>
+      <Focusable style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%" }}>
+        <span className={staticClasses.PanelSectionTitle} style={{ padding: 0 }}>Insignia</span>
+        <DialogButton
+          onClick={onRefresh}
+          disabled={refreshing}
+          style={{
+            height: "28px",
+            width: "28px",
+            padding: "0",
+            minWidth: 0,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <FaSyncAlt style={refreshing ? { animation: "insignia-spin 1s linear infinite" } : undefined} />
+        </DialogButton>
+      </Focusable>
+    </PanelSectionRow>
+  );
+}
+
 function Content() {
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [stats, setStats] = useState<ActiveGamesResponse | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-
-    setLoading(true);
-    getActiveGames().then((result) => {
-      if (cancelled) return;
-      setStats(result);
-      setLoading(false);
-    });
-
-    return () => {
-      cancelled = true;
-    };
+  const fetchStats = useCallback((isRefresh: boolean) => {
+    if (isRefresh) {
+      setRefreshing(true);
+    } else {
+      setLoading(true);
+    }
+    return getActiveGames()
+      .then((result) => {
+        setStats(result);
+      })
+      .finally(() => {
+        setLoading(false);
+        setRefreshing(false);
+      });
   }, []);
+
+  useEffect(() => {
+    fetchStats(false);
+  }, [fetchStats]);
+
+  const handleRefresh = useCallback(() => {
+    fetchStats(true);
+  }, [fetchStats]);
 
   if (loading) {
     return (
-      <PanelSection title="Insignia">
+      <PanelSection>
+        <Header refreshing={refreshing} onRefresh={handleRefresh} />
         <PanelSectionRow>
           <div>Scanning active lobbies...</div>
         </PanelSectionRow>
@@ -108,7 +147,8 @@ function Content() {
 
   if (!stats || stats.error) {
     return (
-      <PanelSection title="Insignia">
+      <PanelSection>
+        <Header refreshing={refreshing} onRefresh={handleRefresh} />
         <PanelSectionRow>
           <div>Could not load stats. Check connection.</div>
         </PanelSectionRow>
@@ -121,7 +161,8 @@ function Content() {
 
   if (games.length === 0 && total === 0) {
     return (
-      <PanelSection title="Insignia">
+      <PanelSection>
+        <Header refreshing={refreshing} onRefresh={handleRefresh} />
         <PanelSectionRow>
           <div>No active lobbies right now.</div>
         </PanelSectionRow>
@@ -130,7 +171,8 @@ function Content() {
   }
 
   return (
-    <PanelSection title="Insignia">
+    <PanelSection>
+      <Header refreshing={refreshing} onRefresh={handleRefresh} />
       {games.length > 0 ? (
         games.map((game) => (
           <StatRow key={game.name} label={game.name} value={game.players} />
