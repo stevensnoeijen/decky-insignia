@@ -25,6 +25,23 @@ These wrap the Decky CLI and are the intended day-to-day workflow if using VSCod
 
 Deploy tasks read connection info (`deckip`, `deckport`, `deckuser`, `deckdir`, etc.) from `.vscode/settings.json`, which is gitignored and user-specific; `config.sh` bootstraps it from `.vscode/defsettings.json` on first run.
 
+### Fast iteration loop (frontend-only changes)
+
+The `builddeploy` VSCode task rebuilds the whole plugin zip via Docker, which is slow for a quick frontend tweak. For changes confined to `src/`, once the plugin has been deployed at least once via `builddeploy`, iterate faster by pushing just the built bundle over the same SSH connection and restarting the loader:
+
+```bash
+pnpm run build
+scp -i ~/.ssh/id_rsa dist/index.js dist/index.js.map <deckuser>@<deckip>:<deckdir>/homebrew/plugins/Insignia/dist/
+ssh -t -i ~/.ssh/id_rsa <deckuser>@<deckip> "echo <deckpass> | sudo -S systemctl restart plugin_loader"
+```
+
+(Values for `<deckuser>`/`<deckip>`/`<deckdir>`/`<deckpass>` come from `.vscode/settings.json`.) This skips repackaging `main.py`/`plugin.json`/`py_modules/`, so use the real `builddeploy` task whenever those change.
+
+### Debugging on-device
+
+- Backend logs: `journalctl -u plugin_loader` on the Deck (needs `sudo`, and `-t` on the SSH command since there's no TTY otherwise) shows plugin load/unload lifecycle events and any Python exceptions. Per-plugin log files also live at `~/homebrew/logs/<PluginName>/` on the Deck.
+- Frontend runtime state/errors aren't in any log — they're in the browser context decky-loader injects into. Steam's `steamwebhelper` exposes a Chrome DevTools Protocol endpoint at `127.0.0.1:8080` on the Deck; tunnel it (`ssh -L <local-port>:127.0.0.1:8080 <deckuser>@<deckip>`), then `curl http://127.0.0.1:<local-port>/json` lists CDP targets. The one named **`SharedJSContext`** is where every decky plugin's frontend code actually executes — grab its `webSocketDebuggerUrl` and send CDP `Runtime.evaluate` calls over that websocket (e.g. a short Node script using the built-in `WebSocket`) to run arbitrary JS live. Useful globals in that context: `window.__ROUTER_HOOK_INSTANCE.routerState._routePatches` is a `Map` keyed by route path (e.g. `/library/app/:appid`) — check it to confirm a `routerHook.addPatch()` call actually registered — and `appStore.allApps` for looking up a real appid to test against. You can jump the live UI to a specific route without touching the device by running `history.pushState({}, '', '/routes/library/app/<appid>'); window.dispatchEvent(new PopStateEvent('popstate'))` in that same context.
+
 ## Architecture
 
 A Decky plugin has two independently-built halves that communicate over a Python↔JS bridge (`@decky/api`'s `callable()`):
