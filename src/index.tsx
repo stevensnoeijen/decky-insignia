@@ -17,7 +17,7 @@ import {
 import { useEffect, useState, useCallback } from "react";
 import { FaSyncAlt, FaArrowLeft, FaChevronRight } from "react-icons/fa";
 import { InsigniaIcon } from "./InsigniaIcon";
-import { INSIGNIA_GAMES } from "./insigniaGames";
+import { INSIGNIA_GAMES, InsigniaGame } from "./insigniaGames";
 
 type ActiveGame = {
   name: string;
@@ -48,6 +48,11 @@ enum EConnectivityTestResult {
 // caches successful responses for 60s; pass forceRefresh=true (wired to the
 // panel's refresh button) to bypass that cache.
 const getActiveGames = callable<[forceRefresh?: boolean], ActiveGamesResponse>("get_active_games");
+
+// Looks up a single title's current online count by its Insignia title ID,
+// sharing get_active_games' 60s cache on the backend rather than triggering
+// its own fetch.
+const getGameOnlineCount = callable<[titleId: string], number>("get_game_online_count");
 
 const getPlaycountBadgeEnabled = callable<[], boolean>("get_playcount_badge_enabled");
 const setPlaycountBadgeEnabledBackend = callable<[boolean], void>("set_playcount_badge_enabled");
@@ -310,8 +315,7 @@ function SettingsPage({ onBack }: { onBack: () => void }) {
 // Position/size/color matched to the "X Online" player-count badge another
 // installed plugin renders in the same top-right spot on this page, so
 // Insignia's badge reads as part of the same family of pills rather than a
-// one-off. 0 is a placeholder until this is wired up to a per-game active
-// player count.
+// one-off.
 const LIBRARY_BADGE_WRAPPER_STYLE = {
   position: "absolute",
   top: "50px",
@@ -375,10 +379,38 @@ function LibraryPlaycountBadge() {
   // loaded here, since this component only renders while that app's own
   // library page is on screen -- unlike home page tiles, which are frequently
   // unvisited and so come back null (see getXboxRomAppIds' comment above).
-  const insigniaSupported =
-    !!appid && isGameSupportedOnInsignia(window.appStore.GetAppOverviewByAppID(Number(appid))?.display_name);
+  const displayName = appid ? window.appStore.GetAppOverviewByAppID(Number(appid))?.display_name : undefined;
+  const insigniaGame = findMatchingInsigniaGame(displayName);
 
-  if (!playcountBadgeEnabled || !xboxEligible || !insigniaSupported) return null;
+  const [onlineCount, setOnlineCount] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!insigniaGame) {
+      setOnlineCount(null);
+      return;
+    }
+    let cancelled = false;
+    const fetchCount = () => {
+      getGameOnlineCount(insigniaGame.id)
+        .then((count) => {
+          if (!cancelled) setOnlineCount(count);
+        })
+        .catch((e) => {
+          console.error("Insignia: failed to load online count", e);
+        });
+    };
+    fetchCount();
+    // Matches the backend's own 60s cache TTL for this data, so this mostly
+    // just picks up whatever the next natural cache refresh produced rather
+    // than forcing extra fetches of its own.
+    const interval = setInterval(fetchCount, 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [insigniaGame?.id]);
+
+  if (!playcountBadgeEnabled || !xboxEligible || !insigniaGame) return null;
 
   return (
     <div style={LIBRARY_BADGE_WRAPPER_STYLE}>
@@ -386,7 +418,7 @@ function LibraryPlaycountBadge() {
         <span style={LIBRARY_BADGE_ICON_STYLE}>
           <InsigniaIcon />
         </span>
-        <span>0 Online</span>
+        <span>{onlineCount ?? 0} Online</span>
       </div>
     </div>
   );
@@ -537,10 +569,15 @@ async function loadXboxRomAppIds() {
 }
 
 // Drops parenthesized region/edition qualifiers (e.g. "(NTSC)", "(USA,
-// Japan)") and punctuation so names that only differ in that kind of
-// formatting still compare equal.
+// Japan)"), ROM file extensions, and punctuation so names that only differ in
+// that kind of formatting still compare equal. The extension strip matters
+// for ROM shortcuts specifically: Steam's display name for one is literally
+// its filename (e.g. "Halo 2 (USA, Europe) (En,Ja,...).xiso"), and leaving
+// ".xiso" in would otherwise dilute the length-coverage ratio nameMatchScore
+// uses for short titles enough to drop a real match below threshold.
 function normalizeGameName(name: string): string {
   return name
+    .replace(/(\.(xiso|iso|xbe))+$/i, "")
     .toLowerCase()
     .replace(/\([^)]*\)/g, "")
     .replace(/[^a-z0-9]+/g, " ")
@@ -567,20 +604,45 @@ function levenshteinDistance(a: string, b: string): number {
 // unrelated titles that merely start with the same word.
 const FUZZY_NAME_MATCH_THRESHOLD = 0.85;
 
-function isFuzzyNameMatch(a: string, b: string): boolean {
+// Returns a 0-1 similarity score, or null if either name is empty. A plain
+// "does either string contain the other" check (with no regard for *how much*
+// of the longer one the shorter one covers) would treat "MechAssault" as a
+// match for "MechAssault 2 - Lone Wolf" -- a real prefix hit, but on an
+// unrelated sequel -- so containment is scored by length-coverage ratio
+// rather than auto-accepted, letting a same-length exact match always
+// outrank a partial prefix/suffix hit.
+function nameMatchScore(a: string, b: string): number | null {
   const normA = normalizeGameName(a);
   const normB = normalizeGameName(b);
-  if (!normA || !normB) return false;
-  if (normA === normB || normA.includes(normB) || normB.includes(normA)) return true;
+  if (!normA || !normB) return null;
+  if (normA === normB) return 1;
+
+  if (normA.includes(normB) || normB.includes(normA)) {
+    return Math.min(normA.length, normB.length) / Math.max(normA.length, normB.length);
+  }
 
   const distance = levenshteinDistance(normA, normB);
-  const similarity = 1 - distance / Math.max(normA.length, normB.length);
-  return similarity >= FUZZY_NAME_MATCH_THRESHOLD;
+  return 1 - distance / Math.max(normA.length, normB.length);
 }
 
-function isGameSupportedOnInsignia(name: string | null | undefined): boolean {
-  if (!name) return false;
-  return INSIGNIA_GAMES.some((game) => isFuzzyNameMatch(name, game.name));
+// Picks the *best*-matching entry rather than the first one to clear the
+// threshold: titles that share a prefix with a sequel/edition/demo (e.g.
+// "Star Wars: Battlefront" / "Star Wars: Battlefront II") would otherwise
+// resolve to whichever entry happens to sort first, showing that game's
+// online count under the wrong badge.
+function findMatchingInsigniaGame(name: string | null | undefined): InsigniaGame | undefined {
+  if (!name) return undefined;
+
+  let best: InsigniaGame | undefined;
+  let bestScore = 0;
+  for (const game of INSIGNIA_GAMES) {
+    const score = nameMatchScore(name, game.name);
+    if (score !== null && score >= FUZZY_NAME_MATCH_THRESHOLD && score > bestScore) {
+      bestScore = score;
+      best = game;
+    }
+  }
+  return best;
 }
 
 // Both view roles wrap the poster <img> in a Steam-authored container with

@@ -20,11 +20,53 @@ INSIGNIA_STATS_URL = "https://insigniastats.live/api/online-users"
 # Reopening the panel (or navigating back into it) shouldn't re-hit the stats
 # service every time -- only an explicit refresh-button click should. Only
 # successful responses are cached; a transient failure shouldn't poison the
-# cache for the full TTL when the next non-forced call could just retry.
-ACTIVE_GAMES_CACHE_TTL_SECONDS = 60
+# cache for the full TTL when the next non-forced call could just retry. The
+# raw response is cached (rather than the Active-Games-parsed shape) so the
+# per-game playcount lookup (get_game_online_count) can share the same cache
+# instead of triggering its own fetch.
+STATS_CACHE_TTL_SECONDS = 60
 
-_active_games_cache: dict | None = None
-_active_games_cache_time: float = 0.0
+_stats_cache: object | None = None
+_stats_cache_time: float = 0.0
+
+
+def _fetch_stats(force_refresh: bool = False) -> object | None:
+    global _stats_cache, _stats_cache_time
+
+    now = time.monotonic()
+    if not force_refresh and _stats_cache is not None and (now - _stats_cache_time) < STATS_CACHE_TTL_SECONDS:
+        return _stats_cache
+
+    try:
+        response = requests.get(INSIGNIA_STATS_URL, timeout=10)
+        response.raise_for_status()
+        raw = response.json()
+    except requests.exceptions.RequestException as e:
+        decky.logger.error(f"Insignia: request to stats service failed: {e}")
+        return None
+    except ValueError as e:
+        decky.logger.error(f"Insignia: could not parse JSON response: {e}")
+        return None
+
+    _stats_cache = raw
+    _stats_cache_time = now
+    return raw
+
+
+def _find_online_count(raw: object, title_id: str) -> int:
+    if not isinstance(raw, dict):
+        return 0
+
+    title_id = title_id.upper()
+    for entry in raw.values():
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("titleId", "")).upper() == title_id:
+            try:
+                return int(entry.get("online", 0))
+            except (TypeError, ValueError):
+                return 0
+    return 0
 
 # The Steam "Properties" dialog's Target field for a non-Steam shortcut is
 # stored as "Exe" in shortcuts.vdf. EmuDeck-style original-Xbox shortcuts
@@ -152,32 +194,16 @@ def _parse_stats_response(raw) -> dict:
 
 class Plugin:
     async def get_active_games(self, force_refresh: bool = False) -> dict:
-        global _active_games_cache, _active_games_cache_time
-
-        now = time.monotonic()
-        if (
-            not force_refresh
-            and _active_games_cache is not None
-            and (now - _active_games_cache_time) < ACTIVE_GAMES_CACHE_TTL_SECONDS
-        ):
-            return _active_games_cache
-
-        try:
-            response = requests.get(INSIGNIA_STATS_URL, timeout=10)
-            response.raise_for_status()
-            raw = response.json()
-        except requests.exceptions.RequestException as e:
-            decky.logger.error(f"Insignia: request to stats service failed: {e}")
+        raw = _fetch_stats(force_refresh)
+        if raw is None:
             return {"error": True, "message": "Could not reach Insignia stats service."}
-        except ValueError as e:
-            decky.logger.error(f"Insignia: could not parse JSON response: {e}")
-            return {"error": True, "message": "Received an invalid response from the stats service."}
+        return _parse_stats_response(raw)
 
-        result = _parse_stats_response(raw)
-        if not result.get("error"):
-            _active_games_cache = result
-            _active_games_cache_time = now
-        return result
+    async def get_game_online_count(self, title_id: str) -> int:
+        raw = _fetch_stats()
+        if raw is None:
+            return 0
+        return _find_online_count(raw, title_id)
 
     async def get_xbox_rom_appids(self) -> list[int]:
         return _get_xbox_rom_appids()
