@@ -703,7 +703,21 @@ function scanAndBadgeTiles() {
     // on that earlier, wrong target, producing a duplicate badge per tile.
     const existingBadge = tile.querySelector(`.${TILE_BADGE_CLASS}`);
     const appId = getTileAppId(tile);
-    const eligible = tileBadgeEnabled && !!appId && !!xboxRomAppIdSet?.has(appId);
+    // Being an Xbox ROM shortcut is necessary but not sufficient (see
+    // LibraryPlaycountBadge above) -- Insignia only serves stats for titles in
+    // INSIGNIA_GAMES. xboxRomAppIdSet.has() is a cheap Set lookup, so it's
+    // checked first via && short-circuiting to skip the display-name lookup
+    // and O(INSIGNIA_GAMES.length) fuzzy match entirely for the vast majority
+    // of tiles that aren't Xbox shortcuts at all. Uses the global window's
+    // appStore, not win's (findSP()'s window doesn't have one -- confirmed
+    // live it's undefined there, which would throw and abort this whole
+    // forEach); the global one has full overviews (incl. display_name) for
+    // every shortcut regardless of whether it's been individually visited.
+    const eligible =
+      tileBadgeEnabled &&
+      !!appId &&
+      !!xboxRomAppIdSet?.has(appId) &&
+      !!findMatchingInsigniaGame(window.appStore.GetAppOverviewByAppID(Number(appId))?.display_name);
 
     // Tiles are recycled by the virtualized carousel, so a badge left over
     // from a previous (Xbox-compatible) game shown in this same DOM node
