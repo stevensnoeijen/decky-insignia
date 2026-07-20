@@ -384,13 +384,42 @@ function LibraryPlaycountBadge() {
 
   const [onlineCount, setOnlineCount] = useState<number | null>(null);
 
+  // navigator.onLine only reflects whether the OS has *some* network
+  // interface up -- it stays true on a Wi-Fi with no real internet (captive
+  // portal, dead upstream), which is exactly the case most worth skipping a
+  // doomed fetch for. SteamClient's own connectivity test (already used by
+  // ActiveGamesPage above) is what Steam itself uses to know if it's really
+  // reachable, so this reuses that instead.
+  const [connectivity, setConnectivity] = useState(EConnectivityTestResult.Unknown);
+
+  useEffect(() => {
+    const registration = SteamClient.System.Network.RegisterForConnectivityTestChanges(
+      (test) => setConnectivity(test.eConnectivityTestResult)
+    );
+    SteamClient.System.Network.ForceTestConnectivity();
+    return () => registration.unregister();
+  }, []);
+
   useEffect(() => {
     if (!insigniaGame) {
       setOnlineCount(null);
       return;
     }
+    // Treated as online unless a test has actually come back bad: Unknown is
+    // the state before the first ForceTestConnectivity result lands, and
+    // defaulting it to "offline" would skip the very first fetch on every
+    // page open just because that result hasn't arrived yet.
+    const isOffline =
+      connectivity !== EConnectivityTestResult.Unknown && connectivity !== EConnectivityTestResult.Connected;
     let cancelled = false;
     const fetchCount = () => {
+      // Re-checked on every call (not just once per effect run) since the
+      // interval below lives for as long as this game's library page stays
+      // open, and playcountBadgeEnabled can flip mid-session via
+      // SettingsPage's toggle -- no point spending a request (and a 10s
+      // backend timeout on a dead connection) on a badge that's hidden or
+      // can't reach the network anyway.
+      if (!playcountBadgeEnabled || isOffline) return;
       getGameOnlineCount(insigniaGame.id)
         .then((count) => {
           if (!cancelled) setOnlineCount(count);
@@ -408,7 +437,7 @@ function LibraryPlaycountBadge() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [insigniaGame?.id]);
+  }, [insigniaGame?.id, connectivity]);
 
   if (!playcountBadgeEnabled || !xboxEligible || !insigniaGame) return null;
 
