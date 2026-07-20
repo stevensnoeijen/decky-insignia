@@ -17,6 +17,7 @@ import {
 import { useEffect, useState, useCallback } from "react";
 import { FaSyncAlt, FaArrowLeft, FaChevronRight } from "react-icons/fa";
 import { InsigniaIcon } from "./InsigniaIcon";
+import { INSIGNIA_GAMES } from "./insigniaGames";
 
 type ActiveGame = {
   name: string;
@@ -49,12 +50,24 @@ const getActiveGames = callable<[], ActiveGamesResponse>("get_active_games");
 const getPlaycountBadgeEnabled = callable<[], boolean>("get_playcount_badge_enabled");
 const setPlaycountBadgeEnabledBackend = callable<[boolean], void>("set_playcount_badge_enabled");
 
+const getTileBadgeEnabled = callable<[], boolean>("get_tile_badge_enabled");
+const setTileBadgeEnabledBackend = callable<[boolean], void>("set_tile_badge_enabled");
+
 // Read by patchLibraryApp, which runs outside React's render cycle (it's a
 // route patch, not a component) and so can't read settings via useState.
 // Seeded from the backend on plugin load and kept in sync by SettingsPage's
 // toggle; defaults to enabled so the badge shows up before that initial load
 // resolves.
 let playcountBadgeEnabled = true;
+
+// Read by scanAndBadgeTiles, which runs on a setInterval/MutationObserver
+// outside React's render cycle and so can't read settings via useState.
+// Seeded from the backend on plugin load and kept in sync by SettingsPage's
+// toggle. Defaults to disabled (unlike playcountBadgeEnabled) since the
+// poster overlay is more visually intrusive; matches DEFAULT_SETTINGS in
+// main.py, which is what actually governs first-run behavior once the
+// backend value loads.
+let tileBadgeEnabled = false;
 
 // Number of trailing characters kept fully visible so that names differing only
 // by a suffix (year, sequel numeral, edition) don't collapse into identical text
@@ -252,11 +265,21 @@ function ActiveGamesPage({ onBack }: { onBack: () => void }) {
 
 function SettingsPage({ onBack }: { onBack: () => void }) {
   const [enabled, setEnabled] = useState(playcountBadgeEnabled);
+  const [tileEnabled, setTileEnabled] = useState(tileBadgeEnabled);
 
   const handleChange = useCallback((checked: boolean) => {
     setEnabled(checked);
     playcountBadgeEnabled = checked;
     setPlaycountBadgeEnabledBackend(checked);
+  }, []);
+
+  const handleTileChange = useCallback((checked: boolean) => {
+    setTileEnabled(checked);
+    tileBadgeEnabled = checked;
+    setTileBadgeEnabledBackend(checked);
+    // Tile badges are stamped onto raw DOM outside React, so without this
+    // the change wouldn't be visible until the next periodic scan/mutation.
+    scanAndBadgeTiles();
   }, []);
 
   return (
@@ -268,6 +291,14 @@ function SettingsPage({ onBack }: { onBack: () => void }) {
           description="Show the active player count badge on a game's library page."
           checked={enabled}
           onChange={handleChange}
+        />
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <ToggleField
+          label="Poster Icon"
+          description="Show the Insignia icon on eligible game posters on the home and library pages."
+          checked={tileEnabled}
+          onChange={handleTileChange}
         />
       </PanelSectionRow>
     </PanelSection>
@@ -313,11 +344,13 @@ const LIBRARY_BADGE_ICON_STYLE = {
   filter: "drop-shadow(rgba(76, 175, 80, 0.5) 0px 0px 2px)",
 } as const;
 
-// Insignia only serves original-Xbox titles, so the badge (even once wired to
-// a real count) would always read "0" on every other game. xboxRomAppIdSet is
-// normally populated by visiting the home page first (see loadXboxRomAppIds),
-// but a user can land here directly via search/collections/back-navigation,
-// so this also kicks off its own load and re-renders once that resolves.
+// Being an Xbox ROM shortcut is necessary but not sufficient: Insignia only
+// serves stats for a subset of Xbox Live-enabled titles (INSIGNIA_GAMES), so
+// the badge also requires the app's actual display name to fuzzy-match one of
+// those. xboxRomAppIdSet is normally populated by visiting the home page
+// first (see loadXboxRomAppIds), but a user can land here directly via
+// search/collections/back-navigation, so this also kicks off its own load and
+// re-renders once that resolves.
 function LibraryPlaycountBadge() {
   const { appid } = useParams<{ appid: string }>();
   const [xboxEligible, setXboxEligible] = useState(() => !!appid && !!xboxRomAppIdSet?.has(appid));
@@ -336,7 +369,14 @@ function LibraryPlaycountBadge() {
     };
   }, [appid]);
 
-  if (!playcountBadgeEnabled || !xboxEligible) return null;
+  // The app's overview (and thus its display name) is expected to already be
+  // loaded here, since this component only renders while that app's own
+  // library page is on screen -- unlike home page tiles, which are frequently
+  // unvisited and so come back null (see getXboxRomAppIds' comment above).
+  const insigniaSupported =
+    !!appid && isGameSupportedOnInsignia(window.appStore.GetAppOverviewByAppID(Number(appid))?.display_name);
+
+  if (!playcountBadgeEnabled || !xboxEligible || !insigniaSupported) return null;
 
   return (
     <div style={LIBRARY_BADGE_WRAPPER_STYLE}>
@@ -368,8 +408,11 @@ const TILE_BADGE_CLASS = "insignia-tile-badge";
 
 const TILE_BADGE_STYLE = {
   position: "absolute",
-  top: "2px",
-  right: "2px",
+  // Matches decky-nonsteam-badges' own 4px inset for its bottom-right badge
+  // on the same tiles, so both badges read as the same family of corner
+  // pills instead of one hugging the edge tighter than the other.
+  top: "4px",
+  right: "4px",
   width: "16px",
   height: "16px",
   borderRadius: "50%",
@@ -491,11 +534,79 @@ async function loadXboxRomAppIds() {
   }
 }
 
-// Grid-view tiles (role="gridcell") are `display: contents`, so they have no
-// box of their own to position against -- the actual positioned card is
-// their first child. List-view tiles (role="listitem") are themselves the
-// positioned box.
+// Drops parenthesized region/edition qualifiers (e.g. "(NTSC)", "(USA,
+// Japan)") and punctuation so names that only differ in that kind of
+// formatting still compare equal.
+function normalizeGameName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/\([^)]*\)/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function levenshteinDistance(a: string, b: string): number {
+  const rows = a.length + 1;
+  const cols = b.length + 1;
+  const dp: number[][] = Array.from({ length: rows }, () => new Array(cols).fill(0));
+  for (let i = 0; i < rows; i++) dp[i][0] = i;
+  for (let j = 0; j < cols; j++) dp[0][j] = j;
+  for (let i = 1; i < rows; i++) {
+    for (let j = 1; j < cols; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
+    }
+  }
+  return dp[a.length][b.length];
+}
+
+// Threshold picked to tolerate small wording/formatting drift (e.g. a
+// trailing "Demo"/"Trial Version" or a missing subtitle) without matching
+// unrelated titles that merely start with the same word.
+const FUZZY_NAME_MATCH_THRESHOLD = 0.85;
+
+function isFuzzyNameMatch(a: string, b: string): boolean {
+  const normA = normalizeGameName(a);
+  const normB = normalizeGameName(b);
+  if (!normA || !normB) return false;
+  if (normA === normB || normA.includes(normB) || normB.includes(normA)) return true;
+
+  const distance = levenshteinDistance(normA, normB);
+  const similarity = 1 - distance / Math.max(normA.length, normB.length);
+  return similarity >= FUZZY_NAME_MATCH_THRESHOLD;
+}
+
+function isGameSupportedOnInsignia(name: string | null | undefined): boolean {
+  if (!name) return false;
+  return INSIGNIA_GAMES.some((game) => isFuzzyNameMatch(name, game.name));
+}
+
+// Both view roles wrap the poster <img> in a Steam-authored container with
+// an inline `position: relative` style that tightly bounds the artwork
+// itself -- decky-nonsteam-badges anchors its own tile badge to the same
+// container (confirmed live via its shipped source). The tile/gridcell
+// element is considerably bigger than that (it also covers the title-text
+// row below the art in list view, and hover-scale headroom), so anchoring
+// to it instead -- as this used to -- puts percentage-based insets like
+// "top: 2px; right: 2px" outside the visible poster rather than in its
+// corner. Walk up from the image to find that tight container first, and
+// only fall back to the coarser tile-level heuristics if no image (or no
+// such ancestor) is found.
+function findPosterContainer(tile: HTMLElement, img: HTMLElement): HTMLElement | null {
+  let node: HTMLElement | null = img.parentElement;
+  while (node && node !== tile) {
+    if (node.style.position === "relative") return node;
+    node = node.parentElement;
+  }
+  return null;
+}
+
 function getBadgeTargetElement(tile: HTMLElement): HTMLElement {
+  const img = tile.querySelector("img") as HTMLElement | null;
+  if (img) {
+    const posterContainer = findPosterContainer(tile, img);
+    if (posterContainer) return posterContainer;
+  }
   if (tile.getAttribute("role") === "gridcell") {
     return (tile.firstElementChild as HTMLElement) ?? tile;
   }
@@ -519,9 +630,16 @@ function scanAndBadgeTiles() {
   );
   tiles.forEach((tile) => {
     const target = getBadgeTargetElement(tile);
-    const existingBadge = target.querySelector(`.${TILE_BADGE_CLASS}`);
+    // Scoped to the whole tile, not just the current target: which element
+    // findPosterContainer picks for a given tile can change across scans (the
+    // tight poster container only gets its inline `position: relative` once
+    // Steam finishes laying out the artwork, so an early scan can fall back
+    // to the coarser tile-level target before a later scan finds the right
+    // one). Scoping the lookup to `target` alone missed a badge left behind
+    // on that earlier, wrong target, producing a duplicate badge per tile.
+    const existingBadge = tile.querySelector(`.${TILE_BADGE_CLASS}`);
     const appId = getTileAppId(tile);
-    const eligible = !!appId && !!xboxRomAppIdSet?.has(appId);
+    const eligible = tileBadgeEnabled && !!appId && !!xboxRomAppIdSet?.has(appId);
 
     // Tiles are recycled by the virtualized carousel, so a badge left over
     // from a previous (Xbox-compatible) game shown in this same DOM node
@@ -530,7 +648,13 @@ function scanAndBadgeTiles() {
       existingBadge?.remove();
       return;
     }
-    if (existingBadge) return;
+    if (existingBadge) {
+      if (existingBadge.parentElement !== target) {
+        existingBadge.remove();
+      } else {
+        return;
+      }
+    }
 
     if (win.getComputedStyle(target).position === "static") {
       target.style.position = "relative";
@@ -608,6 +732,9 @@ function Content() {
 export default definePlugin(() => {
   getPlaycountBadgeEnabled().then((enabled) => {
     playcountBadgeEnabled = enabled;
+  });
+  getTileBadgeEnabled().then((enabled) => {
+    tileBadgeEnabled = enabled;
   });
   loadXboxRomAppIds();
 

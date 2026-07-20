@@ -72,7 +72,7 @@ def _get_xbox_rom_appids() -> list[int]:
 
 
 SETTINGS_PATH = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "settings.json")
-DEFAULT_SETTINGS = {"playcountBadgeEnabled": True}
+DEFAULT_SETTINGS = {"playcountBadgeEnabled": True, "tileBadgeEnabled": False}
 
 
 def _load_settings() -> dict:
@@ -164,6 +164,14 @@ class Plugin:
     async def set_playcount_badge_enabled(self, enabled: bool) -> None:
         settings = _load_settings()
         settings["playcountBadgeEnabled"] = bool(enabled)
+        _save_settings(settings)
+
+    async def get_tile_badge_enabled(self) -> bool:
+        return bool(_load_settings().get("tileBadgeEnabled", True))
+
+    async def set_tile_badge_enabled(self, enabled: bool) -> None:
+        settings = _load_settings()
+        settings["tileBadgeEnabled"] = bool(enabled)
         _save_settings(settings)
 
     # Asyncio-compatible long-running code, executed in a task when the plugin is loaded
