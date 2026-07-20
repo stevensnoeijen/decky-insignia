@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 
 # The decky plugin module is located at decky-loader/plugin
 # For easy intellisense checkout the decky-loader code repo
@@ -15,6 +16,15 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "py_modules"))
 import vdf
 
 INSIGNIA_STATS_URL = "https://insigniastats.live/api/online-users"
+
+# Reopening the panel (or navigating back into it) shouldn't re-hit the stats
+# service every time -- only an explicit refresh-button click should. Only
+# successful responses are cached; a transient failure shouldn't poison the
+# cache for the full TTL when the next non-forced call could just retry.
+ACTIVE_GAMES_CACHE_TTL_SECONDS = 60
+
+_active_games_cache: dict | None = None
+_active_games_cache_time: float = 0.0
 
 # The Steam "Properties" dialog's Target field for a non-Steam shortcut is
 # stored as "Exe" in shortcuts.vdf. EmuDeck-style original-Xbox shortcuts
@@ -141,7 +151,17 @@ def _parse_stats_response(raw) -> dict:
 
 
 class Plugin:
-    async def get_active_games(self) -> dict:
+    async def get_active_games(self, force_refresh: bool = False) -> dict:
+        global _active_games_cache, _active_games_cache_time
+
+        now = time.monotonic()
+        if (
+            not force_refresh
+            and _active_games_cache is not None
+            and (now - _active_games_cache_time) < ACTIVE_GAMES_CACHE_TTL_SECONDS
+        ):
+            return _active_games_cache
+
         try:
             response = requests.get(INSIGNIA_STATS_URL, timeout=10)
             response.raise_for_status()
@@ -153,7 +173,11 @@ class Plugin:
             decky.logger.error(f"Insignia: could not parse JSON response: {e}")
             return {"error": True, "message": "Received an invalid response from the stats service."}
 
-        return _parse_stats_response(raw)
+        result = _parse_stats_response(raw)
+        if not result.get("error"):
+            _active_games_cache = result
+            _active_games_cache_time = now
+        return result
 
     async def get_xbox_rom_appids(self) -> list[int]:
         return _get_xbox_rom_appids()

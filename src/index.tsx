@@ -43,9 +43,11 @@ enum EConnectivityTestResult {
   NoLAN,
 }
 
-// Calls the python function "get_active_games", which fetches (and caches) the
-// current Insignia network stats and returns them in a normalized shape.
-const getActiveGames = callable<[], ActiveGamesResponse>("get_active_games");
+// Calls the python function "get_active_games", which fetches the current
+// Insignia network stats and returns them in a normalized shape. The backend
+// caches successful responses for 60s; pass forceRefresh=true (wired to the
+// panel's refresh button) to bypass that cache.
+const getActiveGames = callable<[forceRefresh?: boolean], ActiveGamesResponse>("get_active_games");
 
 const getPlaycountBadgeEnabled = callable<[], boolean>("get_playcount_badge_enabled");
 const setPlaycountBadgeEnabledBackend = callable<[boolean], void>("set_playcount_badge_enabled");
@@ -188,7 +190,7 @@ function ActiveGamesPage({ onBack }: { onBack: () => void }) {
     } else {
       setLoading(true);
     }
-    return getActiveGames()
+    return getActiveGames(isRefresh)
       .then((result) => {
         setStats(result);
       })
