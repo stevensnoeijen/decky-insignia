@@ -14,7 +14,8 @@ import {
   definePlugin,
   routerHook,
 } from "@decky/api"
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
+import { createPortal } from "react-dom";
 import { FaSyncAlt, FaArrowLeft, FaChevronRight } from "react-icons/fa";
 import { InsigniaIcon } from "./InsigniaIcon";
 import { INSIGNIA_GAMES, InsigniaGame } from "./insigniaGames";
@@ -350,6 +351,33 @@ const LIBRARY_BADGE_ICON_STYLE = {
   filter: "drop-shadow(rgba(76, 175, 80, 0.5) 0px 0px 2px)",
 } as const;
 
+// patchLibraryApp wraps the page's own rendered root in a position:relative
+// div spanning the full (non-scrolling) viewport -- the page's hero banner
+// and details actually live inside an internal scroll container nested
+// somewhere below that root, so a badge positioned absolute against the
+// outer wrapper stays pinned to the screen instead of scrolling away with the
+// hero underneath it. This walks the page root's descendants for the element
+// Steam is actually scrolling (has more content than fits, per its computed
+// overflow-y), so the badge can be anchored inside *that* instead.
+function findLibraryScrollContainer(root: HTMLElement): HTMLElement | null {
+  // This route patch's closure is defined in decky's own injected JS context,
+  // not the Steam window the patched route actually renders into -- bare
+  // `getComputedStyle` here would resolve to that wrong window's version and
+  // silently return empty/useless styles for a foreign-document element, so
+  // this goes through the element's own view instead (same reasoning as
+  // scanAndBadgeTiles's use of findSP()'s window rather than the bare global).
+  const view = root.ownerDocument.defaultView;
+  if (!view) return null;
+  const candidates = root.querySelectorAll<HTMLElement>("*");
+  for (const el of Array.from(candidates)) {
+    const style = view.getComputedStyle(el);
+    if (/(auto|scroll|overlay)/.test(style.overflowY) && el.scrollHeight - el.clientHeight > 10) {
+      return el;
+    }
+  }
+  return null;
+}
+
 // Being an Xbox ROM shortcut is necessary but not sufficient: Insignia only
 // serves stats for a subset of Xbox Live-enabled titles (INSIGNIA_GAMES), so
 // the badge also requires the app's actual display name to fuzzy-match one of
@@ -439,24 +467,81 @@ function LibraryPlaycountBadge() {
     };
   }, [insigniaGame?.id, connectivity]);
 
-  if (!playcountBadgeEnabled || !xboxEligible || !insigniaGame) return null;
+  // patchLibraryApp's wrapper (see below) contains the page's own rendered
+  // content alongside this component -- used below to locate the page's
+  // actual scroll container rather than that non-scrolling wrapper itself.
+  // Note the page's own render output isn't guaranteed to be a single DOM
+  // node (confirmed live it can render as a multi-node fragment), so this
+  // walks up to the shared parent rather than assuming a specific sibling.
+  const markerRef = useRef<HTMLDivElement>(null);
+  const [heroAnchor, setHeroAnchor] = useState<HTMLElement | null>(null);
+  const createdAnchorRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    let retryTimeout: ReturnType<typeof setTimeout>;
+    let attempts = 0;
+    const attach = () => {
+      if (cancelled) return;
+      const pageRoot = markerRef.current?.parentElement as HTMLElement | null;
+      const scrollContainer = pageRoot && findLibraryScrollContainer(pageRoot);
+      if (!scrollContainer) {
+        // The page's own content (and thus its scroll container) may still
+        // be mounting right after navigation; Steam-side pages this large
+        // and complex don't appear instantly. Give up after a few seconds
+        // rather than retrying forever on a page that genuinely never
+        // scrolls (its content fits without overflow).
+        if (attempts++ < 15) retryTimeout = setTimeout(attach, 200);
+        return;
+      }
+      // Zero-height so it doesn't add visible space to the page; sits at
+      // the very top of the scrolled content (i.e. the hero) since it's a
+      // normal-flow first child, so an absolutely-positioned badge inside it
+      // scrolls away together with the hero instead of staying pinned to
+      // the screen.
+      const anchor = scrollContainer.ownerDocument.createElement("div");
+      anchor.style.position = "relative";
+      anchor.style.height = "0px";
+      scrollContainer.insertBefore(anchor, scrollContainer.firstChild);
+      createdAnchorRef.current = anchor;
+      setHeroAnchor(anchor);
+    };
+    attach();
+    return () => {
+      cancelled = true;
+      clearTimeout(retryTimeout);
+      createdAnchorRef.current?.remove();
+      createdAnchorRef.current = null;
+    };
+  }, []);
+
+  const showBadge = playcountBadgeEnabled && xboxEligible && !!insigniaGame;
 
   return (
-    <div style={LIBRARY_BADGE_WRAPPER_STYLE}>
-      <div style={LIBRARY_BADGE_PILL_STYLE}>
-        <span style={LIBRARY_BADGE_ICON_STYLE}>
-          <InsigniaIcon />
-        </span>
-        <span>{onlineCount ?? 0} Online</span>
-      </div>
-    </div>
+    <>
+      <div ref={markerRef} style={{ display: "none" }} />
+      {showBadge &&
+        heroAnchor &&
+        createPortal(
+          <div style={LIBRARY_BADGE_WRAPPER_STYLE}>
+            <div style={LIBRARY_BADGE_PILL_STYLE}>
+              <span style={LIBRARY_BADGE_ICON_STYLE}>
+                <InsigniaIcon />
+              </span>
+              <span>{onlineCount ?? 0} Online</span>
+            </div>
+          </div>,
+          heroAnchor
+        )}
+    </>
   );
 }
 
-// Route patch proving out badge placement on a game's library page. The
-// rendered page isn't guaranteed to be position:relative itself, so we wrap
-// it in our own relative container rather than assuming we can position
-// against its existing layout.
+// Route patch proving out badge placement on a game's library page.
+// LibraryPlaycountBadge finds its own DOM anchor by walking up from itself
+// to this wrapper (its parent) and searching the page content rendered
+// alongside it, so it doesn't matter that this wrapper itself isn't part of
+// the page's internal scroll flow -- it only needs to contain that content.
 function patchLibraryApp(route: any) {
   afterPatch(route.children, "type", (_: unknown[], ret: any) => (
     <div style={{ position: "relative", height: "100%" }}>
